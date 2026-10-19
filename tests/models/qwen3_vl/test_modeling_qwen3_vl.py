@@ -42,11 +42,48 @@ from ...vlm_tester import VLMModelTest, VLMModelTester
 
 if is_torch_available():
     from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLTextConfig
-    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel
+    from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLTextModel, Qwen3VLVisionPatchEmbed
 
 
 if is_torch_available():
     import torch
+
+
+@require_torch
+class Qwen3VLVisionPatchEmbedTest(unittest.TestCase):
+    @parameterized.expand([(1, 4), (2, 4), (2, 16)])
+    def test_matches_conv3d_forward_and_backward(self, temporal_patch_size, patch_size):
+        config = Qwen3VLVisionConfig(
+            patch_size=patch_size, temporal_patch_size=temporal_patch_size, in_channels=3, hidden_size=32
+        )
+        patch_embed = Qwen3VLVisionPatchEmbed(config).double()
+        # Exercise the existing input cast as well as the flattened patch layout.
+        hidden_states = torch.randn(16, 3 * temporal_patch_size * patch_size**2, requires_grad=True)
+        output = patch_embed(hidden_states)
+        reference = torch.nn.functional.conv3d(
+            hidden_states.double().view(-1, 3, temporal_patch_size, patch_size, patch_size),
+            patch_embed.proj.weight,
+            patch_embed.proj.bias,
+            stride=(temporal_patch_size, patch_size, patch_size),
+        ).view(-1, 32)
+        torch.testing.assert_close(output, reference)
+        self.assertEqual(output.dtype, patch_embed.proj.weight.dtype)
+        grad_output = torch.randn_like(output)
+        parameters = (hidden_states, patch_embed.proj.weight, patch_embed.proj.bias)
+        gradients = torch.autograd.grad(output, parameters, grad_output)
+        reference_gradients = torch.autograd.grad(reference, parameters, grad_output)
+        for gradient, reference_gradient in zip(gradients, reference_gradients):
+            torch.testing.assert_close(gradient, reference_gradient)
+
+    def test_does_not_dispatch_conv3d(self):
+        patch_embed = Qwen3VLVisionPatchEmbed(
+            Qwen3VLVisionConfig(patch_size=4, temporal_patch_size=2, in_channels=3, hidden_size=32)
+        )
+        hidden_states = torch.randn(16, 3 * 2 * 4 * 4)
+        # Check dispatch rather than wall time so the regression test also works on CPU.
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profiler:
+            patch_embed(hidden_states)
+        self.assertNotIn("aten::conv3d", {event.key for event in profiler.key_averages()})
 
 
 class Qwen3VLVisionText2TextModelTester(VLMModelTester):

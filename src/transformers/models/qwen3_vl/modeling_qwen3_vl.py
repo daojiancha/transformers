@@ -94,12 +94,12 @@ class Qwen3VLVisionPatchEmbed(nn.Module):
         self.proj = nn.Conv3d(self.in_channels, self.embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        target_dtype = self.proj.weight.dtype
+        # Each kernel covers a full patch, so the convolution is a linear projection.
+        # Avoid Conv3d dispatch, which can fall back to a slow CUDA kernel for this shape.
         hidden_states = hidden_states.view(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
-        )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).view(-1, self.embed_dim)
-        return hidden_states
+            -1, self.in_channels * self.temporal_patch_size * self.patch_size * self.patch_size
+        ).to(dtype=self.proj.weight.dtype)
+        return nn.functional.linear(hidden_states, self.proj.weight.flatten(1), self.proj.bias)
 
 
 class Qwen3VLVisionRotaryEmbedding(nn.Module):
